@@ -1,0 +1,7 @@
+.idea/
+.DS_Store
+vendor/
+/.project
+/.settings
+/elastic_exporter
+/elastic_exporter.yml

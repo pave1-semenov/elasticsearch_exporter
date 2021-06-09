@@ -1,0 +1,12 @@
+stages:
+  - build
+
+build docker image:
+  stage: build
+  tags:
+    - mt-ci-docker
+  only:
+    refs:
+      - /^(develop|master)$/
+  script:
+    - make docker docker-push

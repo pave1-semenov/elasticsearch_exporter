@@ -45,6 +45,7 @@ build: promu
 
 tarball: promu
 	@echo ">> building release tarball"
+	@(GO) mod download -x
 	@$(PROMU) tarball --prefix $(PREFIX) $(BIN_DIR)
 
 docker:

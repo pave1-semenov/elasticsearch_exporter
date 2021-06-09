@@ -4,8 +4,8 @@ repository:
     path: iss.digital/mt/elastic_exporter
 build:
     binaries:
-        - name: sql_exporter
-          path: ./cmd/sql_exporter
+        - name: elastic_exporter
+          path: ./cmd/elastic_exporter
     flags: -a -tags netgo
     ldflags: |
       -X {{repoPath}}/vendor/github.com/prometheus/common/version.Version={{.Version}}

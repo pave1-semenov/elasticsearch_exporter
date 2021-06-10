@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"github.com/elastic/go-elasticsearch/v7"
 	"github.com/elastic/go-elasticsearch/v7/esutil"
-	"io"
 	"iss.digital/mt/elastic_exporter/config"
 	"iss.digital/mt/elastic_exporter/errors"
 )
@@ -20,7 +19,6 @@ type Query struct {
 	logContext  string
 
 	client *elasticsearch.Client
-	body   io.Reader
 }
 
 type columnType int
@@ -118,16 +116,14 @@ func (q *Query) Collect(ctx context.Context, client *elasticsearch.Client, ch ch
 
 // run executes the query on the provided database, in the provided context.
 func (q *Query) run(ctx context.Context, client *elasticsearch.Client) (*elasticSearchQueryResponse, errors.WithContext) {
-	if q.body == nil {
-		q.body = esutil.NewJSONReader(searchRequest{
-			Query:          searchQuery{queryString{Query: q.config.Query}},
-			TrackTotalHits: true,
-		})
-	}
+	query := esutil.NewJSONReader(searchRequest{
+		Query:          searchQuery{queryString{Query: q.config.Query}},
+		TrackTotalHits: true,
+	})
 	search := client.Search
 	var response = elasticSearchQueryResponse{}
 
-	result, err := search(search.WithBody(q.body), search.WithContext(ctx), search.WithTrackTotalHits(true))
+	result, err := search(search.WithBody(query), search.WithContext(ctx), search.WithTrackTotalHits(true))
 
 	if result != nil && result.IsError() {
 		err = errors.Wrapf(q.logContext, err, "Request failed with status code %d", result.StatusCode)

@@ -124,15 +124,20 @@ func (q *Query) run(ctx context.Context, client *elasticsearch.Client) (string, 
 	}
 	query := esutil.NewJSONReader(req)
 	search := client.Search
+	var response string
 
 	result, err := search(search.WithBody(query), search.WithContext(ctx), search.WithTrackTotalHits(true), search.WithSize(0))
+	if result != nil && result.Body != nil {
+		defer result.Body.Close()
 
-	if result != nil && result.IsError() {
-		err = errors.Wrapf(q.logContext, err, "Request failed with status code %d", result.StatusCode)
+		if result.IsError() {
+			err = errors.Wrapf(q.logContext, err, "Request failed with status code %d", result.StatusCode)
+		} else {
+			response = read(result.Body)
+		}
 	}
-	defer result.Body.Close()
 
-	return read(result.Body), errors.Wrap(q.logContext, err)
+	return response, errors.Wrap(q.logContext, err)
 }
 
 func read(r io.Reader) string {

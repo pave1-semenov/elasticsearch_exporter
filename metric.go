@@ -17,8 +17,12 @@ type MetricDesc interface {
 	Help() string
 	ValueType() prometheus.ValueType
 	ConstLabels() []*dto.LabelPair
-	Labels() []string
 	LogContext() string
+}
+
+type labelPair struct {
+	key   string
+	value string
 }
 
 //
@@ -29,26 +33,12 @@ type MetricDesc interface {
 type MetricFamily struct {
 	config      *config.MetricConfig
 	constLabels []*dto.LabelPair
-	labels      []string
 	logContext  string
 }
 
 // NewMetricFamily creates a new MetricFamily with the given metric config and const labels (e.g. job and instance).
 func NewMetricFamily(logContext string, mc *config.MetricConfig, constLabels []*dto.LabelPair) (*MetricFamily, errors.WithContext) {
 	logContext = fmt.Sprintf("%s, metric=%q", logContext, mc.Name)
-
-	if len(mc.Values) == 0 {
-		return nil, errors.New(logContext, "no value column defined")
-	}
-	if len(mc.Values) > 1 && mc.ValueLabel == "" {
-		return nil, errors.New(logContext, "multiple values but no value label")
-	}
-
-	labels := make([]string, 0, len(mc.KeyLabels)+1)
-	labels = append(labels, mc.KeyLabels...)
-	if mc.ValueLabel != "" {
-		labels = append(labels, mc.ValueLabel)
-	}
 
 	// Create a copy of original slice to avoid modifying constLabels
 	sortedLabels := append(constLabels[:0:0], constLabels...)
@@ -64,23 +54,17 @@ func NewMetricFamily(logContext string, mc *config.MetricConfig, constLabels []*
 	return &MetricFamily{
 		config:      mc,
 		constLabels: sortedLabels,
-		labels:      labels,
 		logContext:  logContext,
 	}, nil
 }
 
-// Collect is the equivalent of prometheus.Collector.Collect() but takes a Query output map to populate values from.
-func (mf MetricFamily) Collect(row map[string]interface{}, ch chan<- Metric) {
-	labelValues := make([]string, len(mf.labels))
-	for i, label := range mf.config.KeyLabels {
-		labelValues[i] = row[label].(string)
-	}
-	for _, v := range mf.config.Values {
-		if mf.config.ValueLabel != "" {
-			labelValues[len(labelValues)-1] = v
+func (mf MetricFamily) Collect(metrics []resultMetric, ch chan<- Metric) {
+	for _, m := range metrics {
+		labels := make([]labelPair, 0, 1)
+		if m.labelPair.key != "" && m.labelPair.value != "" {
+			labels = append(labels, m.labelPair)
 		}
-		value := row[v].(float64)
-		ch <- NewMetric(&mf, value, labelValues...)
+		ch <- NewMetric(&mf, m.value, labels...)
 	}
 }
 
@@ -102,11 +86,6 @@ func (mf MetricFamily) ValueType() prometheus.ValueType {
 // ConstLabels implements MetricDesc.
 func (mf MetricFamily) ConstLabels() []*dto.LabelPair {
 	return mf.constLabels
-}
-
-// Labels implements MetricDesc.
-func (mf MetricFamily) Labels() []string {
-	return mf.labels
 }
 
 // LogContext implements MetricDesc.
@@ -183,11 +162,7 @@ type Metric interface {
 
 // NewMetric returns a metric with one fixed value that cannot be changed.
 //
-// NewMetric panics if the length of labelValues is not consistent with desc.labels().
-func NewMetric(desc MetricDesc, value float64, labelValues ...string) Metric {
-	if len(desc.Labels()) != len(labelValues) {
-		panic(fmt.Sprintf("[%s] expected %d labels, got %d", desc.LogContext(), len(desc.Labels()), len(labelValues)))
-	}
+func NewMetric(desc MetricDesc, value float64, labelValues ...labelPair) Metric {
 	return &constMetric{
 		desc:       desc,
 		val:        value,
@@ -221,28 +196,28 @@ func (m *constMetric) Write(out *dto.Metric) errors.WithContext {
 	return nil
 }
 
-func makeLabelPairs(desc MetricDesc, labelValues []string) []*dto.LabelPair {
-	labels := desc.Labels()
+func makeLabelPairs(desc MetricDesc, labelValues []labelPair) []*dto.LabelPair {
 	constLabels := desc.ConstLabels()
 
-	totalLen := len(labels) + len(constLabels)
+	totalLen := len(labelValues) + len(constLabels)
 	if totalLen == 0 {
 		// Super fast path.
 		return nil
 	}
-	if len(labels) == 0 {
+	if len(labelValues) == 0 {
 		// Moderately fast path.
 		return constLabels
 	}
 	labelPairs := make([]*dto.LabelPair, 0, totalLen)
-	for i, label := range labels {
+	for _, label := range labelValues {
 		labelPairs = append(labelPairs, &dto.LabelPair{
-			Name:  proto.String(label),
-			Value: proto.String(labelValues[i]),
+			Name:  proto.String(label.key),
+			Value: proto.String(label.value),
 		})
 	}
 	labelPairs = append(labelPairs, constLabels...)
 	sort.Sort(labelPairSorter(labelPairs))
+
 	return labelPairs
 }
 

@@ -10,6 +10,8 @@ require (
 	github.com/prometheus/client_golang v1.11.0
 	github.com/prometheus/client_model v0.2.0
 	github.com/prometheus/common v0.28.0
+	github.com/tidwall/gjson v1.8.0
 	golang.org/x/sys v0.0.0-20210608053332-aa57babbf139 // indirect
+	gopkg.in/check.v1 v1.0.0-20190902080502-41f04d3bba15 // indirect
 	gopkg.in/yaml.v2 v2.4.0
 )

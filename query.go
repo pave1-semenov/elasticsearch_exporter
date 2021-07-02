@@ -28,7 +28,7 @@ type columnTypeMap map[string]columnType
 
 type searchRequest struct {
 	Query searchQuery            `json:"query"`
-	Aggs  map[string]interface{} `json:"aggs"`
+	Aggs  map[string]interface{} `json:"aggs,omitempty"`
 }
 
 type searchQuery struct {

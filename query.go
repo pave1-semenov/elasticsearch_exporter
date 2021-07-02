@@ -72,11 +72,15 @@ func (q *Query) Collect(ctx context.Context, client *elasticsearch.Client, ch ch
 	}
 
 	aggregations := gjson.Get(resp, "aggregations").Map()
-	metrics := make([]resultMetric, 0, len(aggregations)+1)
+
+	metrics := make([]resultMetric, 0, len(aggregations))
 	total := gjson.Get(resp, "hits.total.value").Float()
-	metrics = append(metrics, resultMetric{
-		value: total,
-	})
+
+	if q.config.TrackTotal {
+		metrics = append(metrics, resultMetric{
+			value: total,
+		})
+	}
 
 	for name, aggregation := range aggregations {
 		buckets := aggregation.Get("buckets")
@@ -105,7 +109,6 @@ func (q *Query) calculateMetricValue(total float64, value float64) float64 {
 	case config.AGGREGATION_TYPE_PERCENT:
 		result = (value * 100) / total
 	case config.AGGREGATION_TYPE_ABSOLUTE:
-	default:
 		result = value
 	}
 

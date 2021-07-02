@@ -339,6 +339,7 @@ func (c *CollectorConfig) UnmarshalYAML(unmarshal func(interface{}) error) error
 				Name:        metric.Name,
 				Query:       metric.QueryLiteral,
 				Aggregation: metric.Aggregation,
+				TrackTotal:  metric.TrackTotal,
 			}
 		}
 	}
@@ -356,6 +357,7 @@ type MetricConfig struct {
 	QueryLiteral string             `yaml:"query,omitempty"`         // a literal query
 	QueryRef     string             `yaml:"query_ref,omitempty"`     // references a query in the query map
 	Aggregation  *AggregationConfig `yaml:"aggregation,omitempty"`   // aggregations
+	TrackTotal   bool               `yaml:"track_total,omitempty"`   // separate metric for total hits
 
 	valueType prometheus.ValueType // TypeString converted to prometheus.ValueType
 	query     *QueryConfig         // QueryConfig resolved from QueryRef or generated from Query
@@ -455,6 +457,7 @@ type QueryConfig struct {
 	Name        string             `yaml:"query_name"`            // the query name, to be referenced via `query_ref`
 	Query       string             `yaml:"query"`                 // the named query
 	Aggregation *AggregationConfig `yaml:"aggregation,omitempty"` // aggregations
+	TrackTotal  bool               `yaml:"track_total,omitempty"` // separate metric for total hits
 
 	metrics []*MetricConfig // metrics referencing this query
 

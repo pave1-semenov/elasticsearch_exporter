@@ -76,7 +76,7 @@ func (q *Query) Collect(ctx context.Context, client *elasticsearch.Client, ch ch
 	metrics := make([]resultMetric, 0, len(aggregations))
 	total := gjson.Get(resp, "hits.total.value").Float()
 
-	if q.config.TrackTotal {
+	if q.config.TrackTotal || q.config.Aggregation == nil {
 		metrics = append(metrics, resultMetric{
 			value: total,
 		})

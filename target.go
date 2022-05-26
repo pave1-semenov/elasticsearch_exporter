@@ -48,7 +48,7 @@ type target struct {
 	client *elasticsearch.Client
 }
 
-// NewTarget returns a new Target with the given instance name, data source name, collectors and constant labels.
+// NewTarget returns a new Target with the given instance name, data source name, collectors and constant filters.
 // An empty target name means the exporter is running in single target mode: no synthetic metrics will be exported.
 func NewTarget(
 	logContext, name, dsn, username, password string, ccs []*config.CollectorConfig, constLabels prometheus.Labels, gc *config.GlobalConfig) (

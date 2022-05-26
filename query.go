@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/elastic/go-elasticsearch/v7"
 	"github.com/elastic/go-elasticsearch/v7/esutil"
+	log "github.com/golang/glog"
 	"github.com/tidwall/gjson"
 	"io"
 	"iss.digital/mt/elastic_exporter/config"
@@ -14,17 +15,13 @@ import (
 
 // Query wraps a elasticsearch query and all the metrics populated from it. It helps extract keys and values from result.
 type Query struct {
-	config         *config.QueryConfig
-	metricFamilies []*MetricFamily
-	// columnTypes maps column names to the column type expected by metrics: key (string) or value (float64).
-	columnTypes columnTypeMap
-	logContext  string
+	config              *config.QueryConfig
+	metricFamilies      []*MetricFamily
+	aggregationHandlers map[string]AggregationHandler
+	logContext          string
 
 	client *elasticsearch.Client
 }
-
-type columnType int
-type columnTypeMap map[string]columnType
 
 type searchRequest struct {
 	Query searchQuery            `json:"query"`
@@ -39,27 +36,36 @@ type queryString struct {
 	Query string `json:"query"`
 }
 
-type resultMetric struct {
-	labelPair
+type metricData struct {
+	*labelPair
 	value float64
+}
+
+func (d metricData) hasLabels() bool {
+	return d.labelPair != nil
 }
 
 // NewQuery returns a new Query that will populate the given metric families.
 func NewQuery(logContext string, qc *config.QueryConfig, metricFamilies ...*MetricFamily) (*Query, errors.WithContext) {
 	logContext = fmt.Sprintf("%s, query=%q", logContext, qc.Name)
-
-	columnTypes := make(columnTypeMap)
+	handlers := make(map[string]AggregationHandler, len(qc.Aggregations))
+	for _, agg := range qc.Aggregations {
+		if handler, err := NewForType(agg.Type(), agg.Name); err != nil {
+			return nil, errors.Wrap(logContext, err)
+		} else {
+			handlers[agg.Name] = handler
+		}
+	}
 
 	q := Query{
-		config:         qc,
-		metricFamilies: metricFamilies,
-		columnTypes:    columnTypes,
-		logContext:     logContext,
+		config:              qc,
+		metricFamilies:      metricFamilies,
+		aggregationHandlers: handlers,
+		logContext:          logContext,
 	}
 	return &q, nil
 }
 
-// Collect is the equivalent of prometheus.Collector.Collect() but takes a context to run in and a database to run on.
 func (q *Query) Collect(ctx context.Context, client *elasticsearch.Client, ch chan<- Metric) {
 	if ctx.Err() != nil {
 		ch <- NewInvalidMetric(errors.Wrap(q.logContext, ctx.Err()))
@@ -73,46 +79,36 @@ func (q *Query) Collect(ctx context.Context, client *elasticsearch.Client, ch ch
 
 	aggregations := gjson.Get(resp, "aggregations").Map()
 
-	metrics := make([]resultMetric, 0, len(aggregations))
+	metricsData := make([]metricData, 0, len(aggregations))
 	total := gjson.Get(resp, "hits.total.value").Float()
 
-	if q.config.TrackTotal || q.config.Aggregation == nil {
-		metrics = append(metrics, resultMetric{
-			value: total,
-		})
-	}
-
 	for name, aggregation := range aggregations {
-		buckets := aggregation.Get("buckets")
-		for _, data := range buckets.Array() {
-			key := data.Get("key")
-			value := data.Get("doc_count").Float()
-
-			metrics = append(metrics, resultMetric{
-				value: q.calculateMetricValue(total, value),
-				labelPair: labelPair{
-					key:   name,
-					value: key.String(),
-				},
-			})
+		if handler, ok := q.aggregationHandlers[name]; !ok {
+			log.Infof("handler for aggregation %s not found in query %s", name, q.config.Name)
+		} else {
+			metricsData = handler.Handle(aggregation, metricsData)
 		}
 	}
 
 	for _, mf := range q.metricFamilies {
-		mf.Collect(metrics, ch)
+		mf.Collect(metricsData, total, ch)
 	}
 }
 
-func (q *Query) calculateMetricValue(total float64, value float64) float64 {
-	var result float64
-	switch q.config.Aggregation.Type {
-	case config.AGGREGATION_TYPE_PERCENT:
-		result = (value * 100) / total
-	case config.AGGREGATION_TYPE_ABSOLUTE:
-		result = value
+func newLabeledMetricData(value float64, labelKey string, labelValue string) metricData {
+	return metricData{
+		value: value,
+		labelPair: &labelPair{
+			key:   labelKey,
+			value: labelValue,
+		},
 	}
+}
 
-	return result
+func newMetricData(value float64) metricData {
+	return metricData{
+		value: value,
+	}
 }
 
 // run executes the query on the provided database, in the provided context.
@@ -120,9 +116,10 @@ func (q *Query) run(ctx context.Context, client *elasticsearch.Client) (string, 
 	req := searchRequest{
 		Query: searchQuery{queryString{Query: q.config.Query}},
 	}
-	if q.config.Aggregation != nil {
-		req.Aggs = map[string]interface{}{
-			q.config.Aggregation.Name: q.config.Aggregation.ParsedBody,
+	if len(q.config.Aggregations) > 0 {
+		req.Aggs = make(map[string]interface{})
+		for _, agg := range q.config.Aggregations {
+			req.Aggs[agg.Name] = agg.ParsedBody
 		}
 	}
 	query := esutil.NewJSONReader(req)
@@ -136,15 +133,18 @@ func (q *Query) run(ctx context.Context, client *elasticsearch.Client) (string, 
 		if result.IsError() {
 			err = errors.Wrapf(q.logContext, err, "Request failed with status code %d", result.StatusCode)
 		} else {
-			response = read(result.Body)
+			response = q.read(result.Body)
 		}
 	}
 
 	return response, errors.Wrap(q.logContext, err)
 }
 
-func read(r io.Reader) string {
+func (q *Query) read(r io.Reader) string {
 	var b bytes.Buffer
-	b.ReadFrom(r)
+	_, err := b.ReadFrom(r)
+	if err != nil {
+		return ""
+	}
 	return b.String()
 }

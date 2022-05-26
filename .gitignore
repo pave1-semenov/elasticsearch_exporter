@@ -5,3 +5,4 @@ vendor/
 /.settings
 /elastic_exporter
 /elastic_exporter.yml
+/*.collector.yml

@@ -29,14 +29,14 @@ type labelPair struct {
 // MetricFamily
 //
 
-// MetricFamily implements MetricDesc for ElasticSearch metrics, with logic for populating its labels and values from query result.
+// MetricFamily implements MetricDesc for ElasticSearch metrics, with logic for populating its filters and values from query result.
 type MetricFamily struct {
 	config      *config.MetricConfig
 	constLabels []*dto.LabelPair
 	logContext  string
 }
 
-// NewMetricFamily creates a new MetricFamily with the given metric config and const labels (e.g. job and instance).
+// NewMetricFamily creates a new MetricFamily with the given metric config and const filters (e.g. job and instance).
 func NewMetricFamily(logContext string, mc *config.MetricConfig, constLabels []*dto.LabelPair) (*MetricFamily, errors.WithContext) {
 	logContext = fmt.Sprintf("%s, metric=%q", logContext, mc.Name)
 
@@ -58,14 +58,48 @@ func NewMetricFamily(logContext string, mc *config.MetricConfig, constLabels []*
 	}, nil
 }
 
-func (mf MetricFamily) Collect(metrics []resultMetric, ch chan<- Metric) {
-	for _, m := range metrics {
-		labels := make([]labelPair, 0, 1)
-		if m.labelPair.key != "" && m.labelPair.value != "" {
-			labels = append(labels, m.labelPair)
+func (mf MetricFamily) Collect(data []metricData, total float64, ch chan<- Metric) {
+	for _, d := range data {
+		labels := make([]*labelPair, 0, 1)
+		if d.hasLabels() && mf.supported(d.labelPair) {
+			labels = append(labels, d.labelPair)
 		}
-		ch <- NewMetric(&mf, m.value, labels...)
+		if !d.hasLabels() || len(labels) > 0 {
+			ch <- NewMetric(&mf, mf.calculateValue(d, total), labels...)
+		}
 	}
+	if mf.config.TrackTotal {
+		ch <- NewMetric(&mf, total)
+	}
+}
+
+func (mf MetricFamily) calculateValue(data metricData, total float64) float64 {
+	var result float64
+	switch mf.config.MetricValueType() {
+	case config.ValueTypePercentage:
+		result = (data.value * 100) / total
+	case config.ValueTypeAbsolute:
+		result = data.value
+	}
+
+	return result
+}
+
+func (mf MetricFamily) supported(pair *labelPair) bool {
+	valid := pair.key != "" && pair.value != ""
+	hasFilters := mf.config.Aggregation() != nil && len(mf.config.Filters) > 0
+	if valid && hasFilters && mf.config.Aggregation().Name == pair.key {
+		defined := false
+		for _, val := range mf.config.Filters {
+			if val == pair.value {
+				defined = true
+				break
+			}
+		}
+		valid = defined
+	}
+
+	return valid
 }
 
 // Name implements MetricDesc.
@@ -145,6 +179,10 @@ func (a automaticMetricDesc) Labels() []string {
 	return a.labels
 }
 
+func (a automaticMetricDesc) AutoLabels() bool {
+	return false
+}
+
 // LogContext implements MetricDesc.
 func (a automaticMetricDesc) LogContext() string {
 	return a.logContext
@@ -161,8 +199,7 @@ type Metric interface {
 }
 
 // NewMetric returns a metric with one fixed value that cannot be changed.
-//
-func NewMetric(desc MetricDesc, value float64, labelValues ...labelPair) Metric {
+func NewMetric(desc MetricDesc, value float64, labelValues ...*labelPair) Metric {
 	return &constMetric{
 		desc:       desc,
 		val:        value,
@@ -196,7 +233,7 @@ func (m *constMetric) Write(out *dto.Metric) errors.WithContext {
 	return nil
 }
 
-func makeLabelPairs(desc MetricDesc, labelValues []labelPair) []*dto.LabelPair {
+func makeLabelPairs(desc MetricDesc, labelValues []*labelPair) []*dto.LabelPair {
 	constLabels := desc.ConstLabels()
 
 	totalLen := len(labelValues) + len(constLabels)

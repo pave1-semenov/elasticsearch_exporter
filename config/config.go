@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"path/filepath"
@@ -173,7 +172,7 @@ func (g *GlobalConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 
 // TargetConfig defines a URL and a set of collectors to be executed on it.
 type TargetConfig struct {
-	URL           Secret   `yaml:"url"` // data source name to connect to
+	URL           Secret   `yaml:"url"` // ElasticSearch URL
 	Username      Secret   `yaml:"username"`
 	Password      Secret   `yaml:"password"`
 	CollectorRefs []string `yaml:"collectors"` // names of collectors to execute on the target
@@ -300,7 +299,7 @@ type CollectorConfig struct {
 	Name        string          `yaml:"collector_name"`         // name of this collector
 	MinInterval model.Duration  `yaml:"min_interval,omitempty"` // minimum interval between query executions
 	Metrics     []*MetricConfig `yaml:"metrics"`                // metrics/queries defined by this collector
-	Queries     []*QueryConfig  `yaml:"queries,omitempty"`      // named queries defined by this collector
+	Queries     []*QueryConfig  `yaml:"queries,omitempty"`      // Lucene queries defined by this collector
 
 	// Catches all undefined fields and must be empty after parsing.
 	XXX map[string]interface{} `yaml:",inline" json:"-"`
@@ -333,52 +332,87 @@ func (c *CollectorConfig) UnmarshalYAML(unmarshal func(interface{}) error) error
 			}
 			metric.query = query
 			query.metrics = append(query.metrics, metric)
+			if metric.AggregationRef != "" {
+				aggFound := false
+				for _, agg := range query.Aggregations {
+					if metric.AggregationRef == agg.Name {
+						aggFound = true
+						metric.aggregation = agg
+					}
+				}
+				if !aggFound {
+					return fmt.Errorf("unresolved aggregation_ref %q in metric %q of collector %q", metric.AggregationRef, metric.Name, c.Name)
+				}
+			}
 		} else {
 			// For literal queries generate a QueryConfig with a name based off collector and metric name.
 			metric.query = &QueryConfig{
-				Name:        metric.Name,
-				Query:       metric.QueryLiteral,
-				Aggregation: metric.Aggregation,
-				TrackTotal:  metric.TrackTotal,
+				Name:         metric.Name,
+				Query:        metric.QueryLiteral,
+				Aggregations: []*AggregationConfig{metric.AggregationLiteral},
 			}
+			metric.aggregation = metric.AggregationLiteral
+		}
+		if err := metric.FinalizeConfig(); err != nil {
+			return err
 		}
 	}
 
 	return checkOverflow(c.XXX, "collector")
 }
 
+type MetricValueType string
+
+const (
+	ValueTypeAbsolute   = MetricValueType("absolute")
+	ValueTypePercentage = MetricValueType("percent")
+)
+
 // MetricConfig defines a Prometheus metric, ElasticSearch query to populate it
 // keys/values.
 type MetricConfig struct {
-	Name         string             `yaml:"metric_name"`             // the Prometheus metric name
-	TypeString   string             `yaml:"type"`                    // the Prometheus metric type
-	Help         string             `yaml:"help"`                    // the Prometheus metric help text
-	StaticLabels map[string]string  `yaml:"static_labels,omitempty"` // fixed key/value pairs as static labels
-	QueryLiteral string             `yaml:"query,omitempty"`         // a literal query
-	QueryRef     string             `yaml:"query_ref,omitempty"`     // references a query in the query map
-	Aggregation  *AggregationConfig `yaml:"aggregation,omitempty"`   // aggregations
-	TrackTotal   bool               `yaml:"track_total,omitempty"`   // separate metric for total hits
-
-	valueType prometheus.ValueType // TypeString converted to prometheus.ValueType
-	query     *QueryConfig         // QueryConfig resolved from QueryRef or generated from Query
+	Name                  string               `yaml:"metric_name"`               // the Prometheus metric name
+	TypeString            string               `yaml:"type"`                      // the Prometheus metric type
+	Help                  string               `yaml:"help"`                      // the Prometheus metric help text
+	Filters               []interface{}        `yaml:"filters,omitempty"`         // expose only these values as labels
+	StaticLabels          map[string]string    `yaml:"static_labels,omitempty"`   // fixed key/value pairs as static labels
+	QueryLiteral          string               `yaml:"query,omitempty"`           // a literal query
+	QueryRef              string               `yaml:"query_ref,omitempty"`       // references a query in the query map
+	AggregationRef        string               `yaml:"aggregation_ref,omitempty"` // references an aggregation in referenced query
+	AggregationLiteral    *AggregationConfig   `yaml:"aggregation,omitempty"`     // aggregations
+	TrackTotal            bool                 `yaml:"track_total,omitempty"`     // separate metric for total hits
+	MetricValueTypeString string               `yaml:"value_type,omitempty"`
+	valueType             prometheus.ValueType // TypeString converted to prometheus.ValueType
+	metricValueType       MetricValueType      // MetricValueTypeString converted to MetricValueType
+	query                 *QueryConfig         // QueryConfig resolved from QueryRef or generated from Query
+	aggregation           *AggregationConfig   // AggregationConfig resolved from AggregationRef or generated from AggregationLiteral
 
 	// Catches all undefined fields and must be empty after parsing.
 	XXX map[string]interface{} `yaml:",inline" json:"-"`
 }
 
-type AggregationResultType string
+type AggregationType string
 
 const (
-	AGGREGATION_TYPE_ABSOLUTE = AggregationResultType("absolute")
-	AGGREGATION_TYPE_PERCENT  = AggregationResultType("percent")
+	AggregationTypeSum         = "sum"
+	AggregationTypeAvg         = "avg"
+	AggregationTypeMin         = "min"
+	AggregationTypeMax         = "max"
+	AggregationTypeStats       = "stats"
+	AggregationTypeTerms       = "terms"
+	AggregationTypeCardinality = "cardinality"
 )
 
-type AggregationConfig struct {
-	Name       string                `yaml:"name"`
-	Type       AggregationResultType `yaml:"type"`
-	RawBody    string                `yaml:"body"`
-	ParsedBody map[string]interface{}
+func (t AggregationType) supportsPercentage() bool {
+	return t == AggregationTypeTerms
+}
 
+type AggregationConfig struct {
+	Name       string `yaml:"name"`
+	TypeString string `yaml:"type"`
+	Field      string `yaml:"field"`
+	ParsedBody map[AggregationType]AggregationField
+	aggType    AggregationType // TypeString parsed into AggregationType
 	// Catches all undefined fields and must be empty after parsing.
 	XXX map[string]interface{} `yaml:",inline" json:"-"`
 }
@@ -389,24 +423,49 @@ func (a *AggregationConfig) UnmarshalYAML(unmarshal func(interface{}) error) err
 	if err := unmarshal((*plain)(a)); err != nil {
 		return err
 	}
+
 	// Check required fields
 	if a.Name == "" {
 		return fmt.Errorf("missing name for aggregation %+v", a)
 	}
-
-	if a.Type == "" {
-		a.Type = AGGREGATION_TYPE_ABSOLUTE
+	if a.Field == "" {
+		return fmt.Errorf("missing field for aggregation %+v", a)
 	}
+	field := AggregationField{Field: a.Field}
 
-	var aggsMap map[string]interface{}
-	err := json.Unmarshal([]byte(a.RawBody), &aggsMap)
+	err := checkLabel(a.Name, "aggregation", a.Name)
 	if err != nil {
-		return fmt.Errorf("failed to parse aggregations %q", a.RawBody)
+		return err
 	}
-
-	a.ParsedBody = aggsMap
+	switch strings.ToLower(a.TypeString) {
+	case "avg":
+		a.aggType = AggregationTypeAvg
+	case "cardinality":
+		a.aggType = AggregationTypeCardinality
+	case "max":
+		a.aggType = AggregationTypeMax
+	case "min":
+		a.aggType = AggregationTypeMin
+	case "stats":
+		a.aggType = AggregationTypeStats
+	case "sum":
+		a.aggType = AggregationTypeSum
+	case "terms":
+		a.aggType = AggregationTypeTerms
+	default:
+		return fmt.Errorf("unsupported aggregation type: %s", a.aggType)
+	}
+	a.ParsedBody = map[AggregationType]AggregationField{a.aggType: field}
 
 	return checkOverflow(a.XXX, "aggregation_config")
+}
+
+func (a *AggregationConfig) Type() AggregationType {
+	return a.aggType
+}
+
+type AggregationField struct {
+	Field string `json:"field"`
 }
 
 // ValueType returns the metric type, converted to a prometheus.ValueType.
@@ -417,6 +476,14 @@ func (m *MetricConfig) ValueType() prometheus.ValueType {
 // Query returns the query defined (as a literal) or referenced by the metric.
 func (m *MetricConfig) Query() *QueryConfig {
 	return m.query
+}
+
+func (m *MetricConfig) MetricValueType() MetricValueType {
+	return m.metricValueType
+}
+
+func (m *MetricConfig) Aggregation() *AggregationConfig {
+	return m.aggregation
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface for MetricConfig.
@@ -439,6 +506,15 @@ func (m *MetricConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	if (m.QueryLiteral == "") == (m.QueryRef == "") {
 		return fmt.Errorf("exactly one of query and query_ref must be specified for metric %q", m.Name)
 	}
+	switch strings.ToLower(m.MetricValueTypeString) {
+	case "absolute":
+	case "":
+		m.metricValueType = ValueTypeAbsolute
+	case "percent":
+		m.metricValueType = ValueTypePercentage
+	default:
+		return fmt.Errorf("unsupported metric value type: %s", m.MetricValueTypeString)
+	}
 
 	switch strings.ToLower(m.TypeString) {
 	case "counter":
@@ -452,12 +528,39 @@ func (m *MetricConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
 	return checkOverflow(m.XXX, "metric")
 }
 
+func (m *MetricConfig) FinalizeConfig() error {
+	if m.aggregation == nil && len(m.Filters) > 0 {
+		return fmt.Errorf("filters without aggregation for metric %s", m.Name)
+	}
+	if len(m.query.Aggregations) > 0 && m.aggregation == nil {
+		return fmt.Errorf("metric %s referencing aggregated query without aggregation_ref", m.Name)
+	}
+	if (m.aggregation != nil && !m.aggregation.aggType.supportsPercentage()) && m.metricValueType == ValueTypePercentage {
+		return fmt.Errorf("percentage value type is not supported for aggregation type %s in metric %s", m.aggregation.TypeString, m.Name)
+	}
+
+	if !m.TrackTotal && len(m.query.Aggregations) > 0 {
+		m.TrackTotal = true
+	}
+
+	return nil
+}
+
+func checkLabel(label string, ctx ...string) error {
+	if label == "" {
+		return fmt.Errorf("empty label defined in %s", strings.Join(ctx, " "))
+	}
+	if label == "job" || label == "instance" {
+		return fmt.Errorf("reserved label %q redefined in %s", label, strings.Join(ctx, " "))
+	}
+	return nil
+}
+
 // QueryConfig defines a named query, to be referenced by one or multiple metrics.
 type QueryConfig struct {
-	Name        string             `yaml:"query_name"`            // the query name, to be referenced via `query_ref`
-	Query       string             `yaml:"query"`                 // the named query
-	Aggregation *AggregationConfig `yaml:"aggregation,omitempty"` // aggregations
-	TrackTotal  bool               `yaml:"track_total,omitempty"` // separate metric for total hits
+	Name         string               `yaml:"query_name"`             // the query name, to be referenced via `query_ref`
+	Query        string               `yaml:"query"`                  // Lucene query
+	Aggregations []*AggregationConfig `yaml:"aggregations,omitempty"` // aggregations
 
 	metrics []*MetricConfig // metrics referencing this query
 
@@ -501,6 +604,7 @@ func (s Secret) MarshalYAML() (interface{}, error) {
 	}
 	return nil, nil
 }
+
 func checkCollectorRefs(collectorRefs []string, ctx string) error {
 	// At least one collector, no duplicates
 	if len(collectorRefs) == 0 {
@@ -538,12 +642,4 @@ func checkOverflow(m map[string]interface{}, ctx string) error {
 		return fmt.Errorf("unknown fields in %s: %s", ctx, strings.Join(keys, ", "))
 	}
 	return nil
-}
-
-func parseAggs(aggs string) (map[string]interface{}, error) {
-	var aggsMap map[string]interface{}
-
-	err := json.Unmarshal([]byte(aggs), &aggsMap)
-
-	return aggsMap, err
 }

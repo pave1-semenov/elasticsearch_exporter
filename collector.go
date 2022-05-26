@@ -28,7 +28,7 @@ type collector struct {
 }
 
 // NewCollector returns a new Collector with the given configuration and database. The metrics it creates will all have
-// the provided const labels applied.
+// the provided const filters applied.
 func NewCollector(logContext string, cc *config.CollectorConfig, constLabels []*dto.LabelPair) (Collector, errors.WithContext) {
 	logContext = fmt.Sprintf("%s, collector=%q", logContext, cc.Name)
 

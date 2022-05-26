@@ -19,7 +19,7 @@ import (
 )
 
 const (
-	contentTypeHeader     = "Content-Type"
+	contentTypeHeader     = "Content-MetricValueTypeString"
 	contentLengthHeader   = "Content-Length"
 	contentEncodingHeader = "Content-Encoding"
 	acceptEncodingHeader  = "Accept-Encoding"
